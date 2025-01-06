@@ -92,3 +92,166 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+
+
+
+
+import pickle
+import pandas as pd
+import numpy as np
+import os
+import json
+import gzip
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, balanced_accuracy_score,
+    confusion_matrix
+)
+
+# Rutas de los archivos de entrada
+train_path = "files/input/train_default_of_credit_card_clients.csv"
+test_path = "files/input/test_default_of_credit_card_clients.csv"
+
+# Paso 1: Limpieza de datos
+def clean_data(filepath):
+    df = pd.read_csv(filepath)
+
+    # Renombrar columna objetivo
+    df.rename(columns={"default payment next month": "default"}, inplace=True)
+
+    # Eliminar columna ID
+    if "ID" in df.columns:
+        df.drop(columns=["ID"], inplace=True)
+
+    # Manejo de valores faltantes
+    df.dropna(inplace=True)
+
+    # Ajustar valores en EDUCATION
+    df["EDUCATION"] = df["EDUCATION"].apply(lambda x: x if x <= 4 else 4)
+
+    return df
+
+train_df = clean_data(train_path)
+test_df = clean_data(test_path)
+
+# Paso 2: División de datasets
+x_train = train_df.drop(columns=["default"])
+y_train = train_df["default"]
+x_test = test_df.drop(columns=["default"])
+y_test = test_df["default"]
+
+# Paso 3: Crear pipeline
+categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features)
+    ],
+    remainder="passthrough"
+)
+
+pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", RandomForestClassifier(random_state=42))
+])
+
+# Paso 4: Optimización de hiperparámetros
+# Definición de parámetros para la búsqueda en malla
+param_grid = {
+    "classifier__n_estimators": [100, 200, 300],
+    "classifier__max_depth": [10, 20, 30],
+    "classifier__min_samples_split": [2, 5, 10],
+}
+
+# Configuración de GridSearchCV
+grid_search = GridSearchCV(
+    pipeline,  # El pipeline completo
+    param_grid=param_grid,
+    scoring="balanced_accuracy",  # Métrica para optimizar
+    cv=10,  # Validación cruzada con 10 divisiones
+    n_jobs=-1,  # Paralelismo
+    verbose=1,  # Salida de progreso
+)
+
+# Ajuste del modelo
+grid_search.fit(x_train, y_train)
+
+# Guardar el mejor modelo
+model_path = "files/models/model.pkl.gz"
+os.makedirs(os.path.dirname(model_path), exist_ok=True) 
+
+with gzip.open(model_path, "wb") as f:
+    pickle.dump(grid_search, f)
+
+# Paso 6: Cálculo de métricas
+def calculate_metrics(model, x, y, dataset_name):
+    y_pred = model.predict(x)
+    return {
+        "type": "metrics",
+        "dataset": dataset_name,
+        "precision": precision_score(y, y_pred, zero_division=0),
+        "balanced_accuracy": balanced_accuracy_score(y, y_pred),
+        "recall": recall_score(y, y_pred, zero_division=0),
+        "f1_score": f1_score(y, y_pred, zero_division=0),
+    }
+
+
+    # print(precision_score(y, y_pred, zero_division=0))
+    # print(balanced_accuracy_score(y, y_pred))
+    # print(recall_score(y, y_pred, zero_division=0))
+    # print(f1_score(y, y_pred, zero_division=0))
+
+
+
+def calculate_confusion_matrix(model, x, y, dataset_name):
+    y_pred = model.predict(x)
+    cm = confusion_matrix(y, y_pred)
+    return {
+        "type": "cm_matrix",
+        "dataset": dataset_name,
+        "true_0": {"predicted_0": cm[0, 0], "predicted_1": cm[0, 1]},
+        "true_1": {"predicted_0": cm[1, 0], "predicted_1": cm[1, 1]},
+    }
+
+
+
+metrics = [
+    calculate_metrics(grid_search.best_estimator_, x_train, y_train, "train"),
+    calculate_metrics(grid_search.best_estimator_, x_test, y_test, "test"),
+]
+
+cm_train = calculate_confusion_matrix(grid_search.best_estimator_, x_train, y_train, "train")
+cm_test = calculate_confusion_matrix(grid_search.best_estimator_, x_test, y_test, "test")
+
+metrics.append(cm_train)
+metrics.append(cm_test)
+
+for m in metrics:
+    print(m)
+
+# Convertir a tipos JSON-serializables
+def convert_to_serializable(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        raise TypeError(f"Type {type(obj)} not serializable")
+
+# Guardar métricas como JSON
+output_path = "files/output/metrics.json"
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+with open(output_path, 'w') as f:
+    for metric in metrics:
+        json_line = json.dumps(metric, default=convert_to_serializable)
+        f.write(json_line + '\n')
+
+
+
+print("Proceso completado. Modelo y métricas guardados.")
